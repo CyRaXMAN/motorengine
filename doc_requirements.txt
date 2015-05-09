@@ -1,6 +1,6 @@
-setuptools==1.1
+setuptools
 sphinx
-pymongo==2.5
+pymongo
 tornado
 motor
 six
