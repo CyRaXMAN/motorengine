@@ -24,6 +24,7 @@ class User(Document):
     is_admin = BooleanField(default=True)
     website = URLField(default="http://google.com/")
     updated_at = DateTimeField(required=True, auto_now_on_insert=True, auto_now_on_update=True)
+    facebook_id = StringField(unique=True, sparse=True)
 
     def __repr__(self):
         return "%s %s <%s>" % (self.first_name, self.last_name, self.email)
@@ -74,6 +75,7 @@ class TestDocument(AsyncTestCase):
         expect(result.email).to_equal("heynemann@gmail.com")
         expect(result.first_name).to_equal("Bernardo")
         expect(result.last_name).to_equal("Heynemann")
+        expect(result.facebook_id).to_be_null()
 
     def test_can_create_new_instance_with_defaults(self):
         user = User(email="heynemann@gmail.com")
@@ -86,6 +88,24 @@ class TestDocument(AsyncTestCase):
         expect(result.first_name).to_equal("Bernardo")
         expect(result.last_name).to_equal("Heynemann")
         expect(result.is_admin).to_be_true()
+
+    def test_can_create_new_instance_with_defaults_and_db_fields(self):
+        class Model(Document):
+            last_name = StringField(db_field="db_last", default="Heynemann")
+            first_name = StringField(
+                db_field="db_first", default=lambda: "Bernardo"
+            )
+
+        self.drop_coll(Model.__collection__)
+
+        model = Model()
+        model.save(callback=self.stop)
+
+        result = self.wait()
+
+        expect(result._id).not_to_be_null()
+        expect(result.first_name).to_equal("Bernardo")
+        expect(result.last_name).to_equal("Heynemann")
 
     def test_creating_invalid_instance_fails(self):
         user = User(email="heynemann@gmail.com", first_name="Bernardo", last_name="Heynemann", website="bla")
@@ -160,6 +180,7 @@ class TestDocument(AsyncTestCase):
         expect(retrieved_user.last_name).to_equal("Heynemann")
         expect(retrieved_user.emp_number).to_equal("Employee")
         expect(retrieved_user.is_admin).to_be_true()
+        expect(retrieved_user.facebook_id).to_be_null()
 
     def test_can_get_instance_with_id_string(self):
         user = Employee(email="heynemann@gmail.com", first_name="Bernardo", last_name="Heynemann", emp_number="Employee")
@@ -214,28 +235,51 @@ class TestDocument(AsyncTestCase):
 
     def test_can_find_with_multiple_filters(self):
         User.objects.create(email="heynemann@gmail.com", first_name="Bernardo", last_name="Heynemann", callback=self.stop)
-        user = self.wait()
+        self.wait()
 
         User.objects.create(email="someone@gmail.com", first_name="Someone", last_name="Else", callback=self.stop)
         self.wait()
 
         User.objects.create(email="someone@gmail.com", first_name="Bernardo", last_name="Heynemann", callback=self.stop)
-        self.wait()
+        user = self.wait()
 
         User.objects.create(email="other@gmail.com", first_name="Bernardo", last_name="Silva", callback=self.stop)
         last_user = self.wait()
 
-        User.objects.filter(first_name="Bernardo").filter_not(email="someone@gmail.com").find_all(callback=self.stop)
+        # filter and filter not
+        User.objects.filter(email="someone@gmail.com").filter_not(first_name="Someone").find_all(callback=self.stop)
         users = self.wait()
 
         expect(users).to_be_instance_of(list)
-        expect(users).to_length(2)
+        expect(users).to_length(1)
 
         first_user = users[0]
-        expect(first_user.first_name).to_equal(user.first_name)
-        expect(first_user.last_name).to_equal(user.last_name)
-        expect(first_user.email).to_equal(user.email)
+        expect(first_user._id).to_equal(user._id)
 
+        # filter and filter not for Q
+        from motorengine import Q
+        User.objects.filter(email="someone@gmail.com")\
+            .filter_not(Q(first_name="Someone")).find_all(callback=self.stop)
+        users = self.wait()
+
+        expect(users).to_be_instance_of(list)
+        expect(users).to_length(1)
+
+        first_user = users[0]
+        expect(first_user._id).to_equal(user._id)
+
+        # filter not and filter not
+        User.objects.filter_not(last_name="Heynemann")\
+            .filter_not(first_name="Someone").find_all(callback=self.stop)
+        users = self.wait()
+
+        expect(users).to_be_instance_of(list)
+        expect(users).to_length(1)
+
+        first_user = users[0]
+        expect(first_user._id).to_equal(last_user._id)
+
+        # filter and filter
         User.objects.filter(last_name="Silva").filter(first_name="Bernardo").find_all(callback=self.stop)
         users = self.wait()
 
@@ -912,6 +956,25 @@ class TestDocument(AsyncTestCase):
             UniqueFieldDocument.objects.create(name="test", callback=self.stop)
             self.wait()
 
+    def test_unique_sparse_field(self):
+        class UniqueSparseFieldDocument(Document):
+            unique_id = StringField(unique=True, sparse=True)
+
+        UniqueSparseFieldDocument.objects.delete(callback=self.stop)
+        self.wait()
+
+        UniqueSparseFieldDocument.ensure_index(callback=self.stop)
+        self.wait()
+
+        UniqueSparseFieldDocument.objects.create(unique_id=None, callback=self.stop)
+        self.wait()
+
+        try:
+            UniqueSparseFieldDocument.objects.create(unique_id=None, callback=self.stop)
+            self.wait()
+        except UniqueKeyViolationError:
+            assert False, "UniqueKeyViolationError should net be raised for unique sparse field with empty value"
+
     def test_json_field_with_document(self):
         class JSONFieldDocument(Document):
             field = JsonField()
@@ -1023,6 +1086,66 @@ class TestDocument(AsyncTestCase):
         document_count = self.wait()
 
         expect(document_count).to_equal(1)
+
+    def test_dynamic_fields_with_two_version_fields(self):
+
+        class Version1Document(Document):
+            __collection__ = "TestDynamicFieldDocumentQuery1"
+            old_element = StringField(default="old_string_field")
+
+        class Version2Document(Document):
+            __collection__ = "TestDynamicFieldDocumentQuery1"
+            old_element = StringField(default="old_string_field")
+            new_element = StringField(default="new_string_field")
+
+
+        self.drop_coll(Version1Document.__collection__)
+
+        doc1 = Version1Document()
+        doc1.old_element = "my_old_string_field1"
+        doc1.save(callback=self.stop)
+        doc1 = self.wait()
+
+        doc2 = Version2Document()
+        doc2.old_element = "my_old_string_field2"
+        doc2.new_element = "my_new_string_field2"
+        doc2.save(callback=self.stop)
+        doc2 = self.wait()
+
+        # Querying with the old Version1.
+        # This effect happens when you have 2 different services using different versions of the document.
+        # When editing the version1 document, no _dynfield value should be added because version2 will
+        # eventually overwrite real values from new_field.
+        Version1Document.objects.get(old_element="my_old_string_field2", callback=self.stop)
+        doc2_with_version1 = self.wait()
+
+        expect(doc2_with_version1._id).not_to_be_null()
+        expect(doc2_with_version1.old_element).to_equal("my_old_string_field2")
+        expect(doc2_with_version1.new_element).to_equal("my_new_string_field2")
+
+        Version1Document.objects.get(old_element="my_old_string_field2", callback=self.stop)
+        doc2_with_version1 = self.wait()
+
+        expect(doc2_with_version1._id).not_to_be_null()
+        expect(doc2_with_version1.old_element).to_equal("my_old_string_field2")
+        expect(doc2_with_version1.new_element).to_equal("my_new_string_field2")
+
+        # Changing one field and saving it.
+        doc2_with_version1.old_element = "my_old_string_field2_modified"
+        doc2_with_version1.save(callback=self.stop)
+        doc2_with_version1 = self.wait()
+        # The database should contain the dynamic field.
+        # Querying with the new version should not overwrite the data.
+        Version2Document.objects.get(old_element="my_old_string_field2_modified", callback=self.stop)
+        doc2_with_version2 = self.wait()
+        expect(doc2_with_version2._id).not_to_be_null()
+        expect(doc2_with_version2.old_element).to_equal("my_old_string_field2_modified")
+
+        doc2_with_version2.save(callback=self.stop)
+        doc2_with_version2 = self.wait()
+
+        # After saving the new version of the document it should stay the way it was designed to be
+        expect(doc2_with_version2.new_element).to_equal("my_new_string_field2")
 
     def test_can_query_by_elem_match(self):
         class ElemMatchDocument(Document):
